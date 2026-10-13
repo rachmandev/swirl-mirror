@@ -46,8 +46,154 @@ export class FileExplorer {
   constructor(baseDir: string) {
     this.baseDir = path.resolve(baseDir);
     if (!fs.existsSync(this.baseDir)) {
-      fs.mkdirSync(this.baseDir, { recursive: true });
+      fs.mkdirSync(this.baseDir, { recursive: true, mode: 0o777 });
     }
+    this.normalizePermissions(this.baseDir);
+  }
+
+  /**
+   * Ensures directories and files in storage have shared read/write permissions
+   * so switching between Docker container and native execution does not cause EACCES errors.
+   */
+  private normalizePermissions(dirPath: string): void {
+    try {
+      fs.chmodSync(dirPath, 0o777);
+    } catch {
+      // Ignore if owned by another UID
+    }
+
+    try {
+      const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+      for (const entry of entries) {
+        const fullPath = path.join(dirPath, entry.name);
+
+        // Clean up any leftover hidden legacy directories if current UID has permission
+        if (entry.name.startsWith('.legacy_')) {
+          try {
+            fs.rmSync(fullPath, { recursive: true, force: true });
+          } catch {
+            // Keep hidden until container/root cleans it up
+          }
+          continue;
+        }
+
+        if (entry.name.startsWith('.')) continue;
+
+        if (entry.isDirectory()) {
+          if (!this.isWritable(fullPath) && this.isWritable(dirPath)) {
+            this.reclaimDirectoryOwnership(fullPath);
+          } else {
+            this.normalizePermissions(fullPath);
+          }
+        } else if (entry.isFile()) {
+          if (!this.isWritable(fullPath) && this.isWritable(dirPath)) {
+            this.reclaimFileOwnership(fullPath);
+          } else {
+            try {
+              fs.chmodSync(fullPath, 0o666);
+            } catch {
+              // Ignore if owned by another UID
+            }
+          }
+        }
+      }
+    } catch {
+      // Ignore unreadable directories
+    }
+  }
+
+  private isWritable(targetPath: string): boolean {
+    try {
+      fs.accessSync(targetPath, fs.constants.W_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Replaces a file owned by a different UID inside a writable directory
+   * with a writable copy owned by the current user, using CoW reflink where supported.
+   */
+  private reclaimFileOwnership(filePath: string): void {
+    const tmpPath = `${filePath}.tmp_${Date.now()}`;
+    try {
+      const fileStat = fs.statSync(filePath);
+      try {
+        fs.copyFileSync(filePath, tmpPath, fs.constants.COPYFILE_FICLONE);
+      } catch {
+        fs.copyFileSync(filePath, tmpPath);
+      }
+      fs.chmodSync(tmpPath, 0o666);
+      fs.utimesSync(tmpPath, fileStat.atime, fileStat.mtime);
+      fs.unlinkSync(filePath);
+      fs.renameSync(tmpPath, filePath);
+    } catch {
+      try {
+        if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+      } catch {}
+    }
+  }
+
+  /**
+   * Replaces a directory owned by a different UID (e.g. root from Docker container)
+   * with a writable copy owned by the current user, using CoW reflink where supported.
+   */
+  private reclaimDirectoryOwnership(dirPath: string): void {
+    const parentDir = path.dirname(dirPath);
+    const baseName = path.basename(dirPath);
+    const legacyPath = path.join(parentDir, `.legacy_${baseName}_${Date.now()}`);
+
+    try {
+      fs.renameSync(dirPath, legacyPath);
+      this.copyDirectoryWritable(legacyPath, dirPath);
+      try {
+        fs.rmSync(legacyPath, { recursive: true, force: true });
+      } catch {
+        // Legacy dir starts with '.' so it remains hidden from listings
+      }
+    } catch {
+      // Restore if copy failed before dirPath was created
+      if (!fs.existsSync(dirPath) && fs.existsSync(legacyPath)) {
+        try {
+          fs.renameSync(legacyPath, dirPath);
+        } catch {}
+      }
+    }
+  }
+
+  private copyDirectoryWritable(srcDir: string, destDir: string): void {
+    const srcStat = fs.statSync(srcDir);
+    fs.mkdirSync(destDir, { recursive: true, mode: 0o777 });
+    try {
+      fs.chmodSync(destDir, 0o777);
+    } catch {}
+
+    const entries = fs.readdirSync(srcDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue;
+      const srcChild = path.join(srcDir, entry.name);
+      const destChild = path.join(destDir, entry.name);
+
+      if (entry.isDirectory()) {
+        this.copyDirectoryWritable(srcChild, destChild);
+      } else if (entry.isFile()) {
+        const fileStat = fs.statSync(srcChild);
+        try {
+          fs.copyFileSync(srcChild, destChild, fs.constants.COPYFILE_FICLONE);
+        } catch {
+          fs.copyFileSync(srcChild, destChild);
+        }
+        try {
+          fs.chmodSync(destChild, 0o666);
+          fs.utimesSync(destChild, fileStat.atime, fileStat.mtime);
+        } catch {}
+      }
+    }
+
+    try {
+      fs.utimesSync(destDir, srcStat.atime, srcStat.mtime);
+    } catch {}
   }
 
   public getBaseDir(): string {

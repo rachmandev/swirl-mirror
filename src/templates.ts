@@ -56,6 +56,9 @@ export function renderHtmlDirectoryListing(
       actionsHtml += `<a href="${item.relPath}" download title="Unduh ${escapeHtml(item.name)}" class="btn-action">Unduh</a>`;
     }
     actionsHtml += `<button class="btn-action btn-copy" onclick="copyUrl('${hostUrl}${item.relPath}', this)" title="Salin URL">Salin URL</button>`;
+    if (isAdmin) {
+      actionsHtml += `<button class="btn-action btn-delete" data-path="${escapeHtml(item.relPath)}" data-name="${escapeHtml(item.name)}" data-isdir="${item.isDirectory ? '1' : '0'}" onclick="deleteItem(this)" title="Hapus ${escapeHtml(item.name)}">Hapus</button>`;
+    }
 
     const nameLink = item.icon === 'image'
       ? `<a href="${item.relPath}" class="link-file link-image" style="--preview-url:url(${item.relPath})">${escapeHtml(item.name)}</a>`
@@ -342,7 +345,7 @@ export function renderHtmlDirectoryListing(
     .col-name { min-width: 220px; }
     .col-date { width: 160px; white-space: nowrap; color: #666; font-size: 12px; }
     .col-size { width: 100px; text-align: right; white-space: nowrap; font-size: 12px; }
-    .col-actions { width: 160px; text-align: right; white-space: nowrap; }
+    .col-actions { width: 220px; text-align: right; white-space: nowrap; }
 
     .link-dir { font-weight: 700; color: var(--link); text-decoration: none; }
     .link-file { color: var(--link); text-decoration: none; }
@@ -402,6 +405,17 @@ export function renderHtmlDirectoryListing(
     }
 
     .btn-action:hover { background: var(--border); }
+
+    .btn-delete {
+      color: var(--debian-red);
+      border-color: rgba(215, 10, 83, 0.35);
+    }
+
+    .btn-delete:hover {
+      background: var(--debian-red);
+      border-color: var(--debian-dark-red);
+      color: #ffffff;
+    }
 
     /* Footer */
     footer {
@@ -585,7 +599,9 @@ export function renderHtmlDirectoryListing(
         return;
       }
 
-      var targetUrl = currentDirectory.endsWith('/') ? currentDirectory + file.name : currentDirectory + '/' + file.name;
+      var basePath = currentDirectory.split('/').map(encodeURIComponent).join('/');
+      var encodedFileName = encodeURIComponent(file.name);
+      var targetUrl = basePath.endsWith('/') ? basePath + encodedFileName : basePath + '/' + encodedFileName;
       var progressEl = document.getElementById('uploadProgress');
       var fillEl = document.getElementById('progressFill');
       var nameEl = document.getElementById('uploadFileName');
@@ -607,7 +623,12 @@ export function renderHtmlDirectoryListing(
           showToast('Berhasil mengunggah: ' + file.name);
           setTimeout(function() { window.location.reload(); }, 600);
         } else {
-          showToast('Gagal mengunggah: ' + xhr.statusText);
+          var errMsg = xhr.statusText;
+          try {
+            var resData = JSON.parse(xhr.responseText);
+            if (resData && resData.error) errMsg = resData.error;
+          } catch (e) {}
+          showToast('Gagal mengunggah: ' + (errMsg || 'Error ' + xhr.status));
         }
         setTimeout(function() { progressEl.classList.remove('active'); }, 2000);
       };
@@ -623,6 +644,7 @@ export function renderHtmlDirectoryListing(
     function handleFileSelected(event) {
       var file = event.target.files[0];
       if (file) uploadFile(file);
+      event.target.value = '';
     }
 
     // Drag & Drop (bisa lepas file langsung ke halaman browser)
@@ -655,6 +677,49 @@ export function renderHtmlDirectoryListing(
           }
         });
       }).catch(function(err) {
+        showToast('Kesalahan: ' + err.message);
+      });
+    }
+
+    function deleteItem(btn) {
+      var targetPath = btn.getAttribute('data-path');
+      var itemName = btn.getAttribute('data-name') || targetPath;
+      var isDir = btn.getAttribute('data-isdir') === '1';
+      if (!targetPath) return;
+
+      var confirmMsg = isDir
+        ? 'Apakah Anda yakin ingin menghapus folder "' + itemName + '" beserta seluruh isinya?'
+        : 'Apakah Anda yakin ingin menghapus berkas "' + itemName + '"?';
+
+      if (!confirm(confirmMsg)) return;
+
+      btn.disabled = true;
+      var origText = btn.innerText;
+      btn.innerText = 'Menghapus...';
+
+      var encodedPath = targetPath.split('/').map(encodeURIComponent).join('/');
+
+      fetch(encodedPath, {
+        method: 'DELETE'
+      }).then(function(res) {
+        return res.json().then(function(data) {
+          if (res.ok) {
+            showToast((isDir ? 'Folder "' : 'Berkas "') + itemName + '" berhasil dihapus!');
+            var row = btn.closest('tr');
+            if (row) {
+              row.style.opacity = '0.3';
+              row.style.transition = 'opacity 0.3s';
+            }
+            setTimeout(function() { window.location.reload(); }, 500);
+          } else {
+            btn.disabled = false;
+            btn.innerText = origText;
+            showToast('Gagal menghapus: ' + (data.error || res.statusText));
+          }
+        });
+      }).catch(function(err) {
+        btn.disabled = false;
+        btn.innerText = origText;
         showToast('Kesalahan: ' + err.message);
       });
     }

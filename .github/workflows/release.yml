@@ -73,8 +73,8 @@ jobs:
           sed "s|SWIRL_MIRROR_VERSION=latest|SWIRL_MIRROR_VERSION=${TAG}|g" .env.example > dist/.env.example
 
           # Bundle file docker compose & env template untuk kemudahan deploy cepat
-          zip -j dist/swirl-mirror-docker-quickstart.zip dist/docker-compose.yml dist/.env.example README.md LICENSE
-          tar -czvf dist/swirl-mirror-docker-quickstart.tar.gz -C dist docker-compose.yml .env.example -C "$GITHUB_WORKSPACE" README.md LICENSE
+          zip -j dist/swirl-mirror-docker-quickstart.zip dist/.env.example dist/docker-compose.yml README.md
+          tar -czvf dist/swirl-mirror-docker-quickstart.tar.gz -C dist .env.example docker-compose.yml -C "$GITHUB_WORKSPACE" README.md LICENSE
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v3

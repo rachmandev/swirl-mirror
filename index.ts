@@ -22,7 +22,10 @@ const PORT = Number(process.env.PORT) || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
 const DISPLAY_HOST = process.env.DISPLAY_HOST || 'localhost';
 const STORAGE_DIR = path.resolve(process.env.STORAGE_DIR || './storage');
-const TITLE = process.env.TITLE || 'Debian File Repository';
+const TITLE = process.env.TITLE || 'Swirl-Mirror Repository';
+
+// Ensure files and folders created by the server are accessible across both Docker and native host runs
+process.umask(0);
 
 // Initialize file explorer & ensure storage directory exists
 const explorer = new FileExplorer(STORAGE_DIR);
@@ -140,7 +143,8 @@ app.post('/api/mkdir', async (req: Request, res: Response) => {
   }
 
   try {
-    await fs.promises.mkdir(fullPath, { recursive: true });
+    await fs.promises.mkdir(fullPath, { recursive: true, mode: 0o777 });
+    await fs.promises.chmod(fullPath, 0o777).catch(() => {});
     res.json({ success: true, path: relPath });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -162,7 +166,7 @@ app.delete('{*path}', async (req: Request, res: Response) => {
   try {
     const stat = await fs.promises.stat(fullPath);
     if (stat.isDirectory()) {
-      await fs.promises.rm(fullPath, { recursive: true });
+      await fs.promises.rm(fullPath, { recursive: true, force: true });
     } else {
       await fs.promises.unlink(fullPath);
     }
@@ -176,7 +180,7 @@ app.delete('{*path}', async (req: Request, res: Response) => {
 });
 
 // ─── PUT: Upload file (only allowed extensions) ─────────────────────────────
-app.put('{*path}', async (req: Request, res: Response) => {
+app.put('{*path}', (req: Request, res: Response) => {
   if (!isAuthenticated(req.headers.cookie)) {
     return res.status(401).json({ error: 'Tidak terautentikasi. Silakan login terlebih dahulu.' });
   }
@@ -198,20 +202,40 @@ app.put('{*path}', async (req: Request, res: Response) => {
   }
 
   try {
-    await fs.promises.mkdir(path.dirname(fullPath), { recursive: true });
+    const parentDir = path.dirname(fullPath);
+    fs.mkdirSync(parentDir, { recursive: true, mode: 0o777 });
+    try {
+      fs.chmodSync(parentDir, 0o777);
+    } catch {}
 
-    const writeStream = fs.createWriteStream(fullPath);
+    // Hapus file lama terlebih dahulu jika sudah ada (mencegah EACCES jika file lama dimiliki UID container)
+    if (fs.existsSync(fullPath)) {
+      try {
+        fs.unlinkSync(fullPath);
+      } catch {}
+    }
+
+    const writeStream = fs.createWriteStream(fullPath, { mode: 0o666 });
     req.pipe(writeStream);
 
     writeStream.on('finish', () => {
-      res.status(201).json({ success: true, path: relPath });
+      try {
+        fs.chmodSync(fullPath, 0o666);
+      } catch {}
+      if (!res.headersSent) {
+        res.status(201).json({ success: true, path: relPath });
+      }
     });
 
     writeStream.on('error', (err) => {
-      res.status(500).json({ error: err.message });
+      if (!res.headersSent) {
+        res.status(500).json({ error: err.message });
+      }
     });
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    if (!res.headersSent) {
+      res.status(500).json({ error: err.message });
+    }
   }
 });
 
@@ -296,12 +320,11 @@ const server = app.listen(PORT, HOST, () => {
   const allowed = [...ALLOWED_EXTENSIONS].join(', ');
   console.log(`
 ╔══════════════════════════════════════════════════════════════════════════════════╗
-║             DEBIAN FILE REPOSITORY • AUTO-DISCOVERY                              ║
+║             SWIRL-MIRROR REPOSITORY • AUTO-DISCOVERY                             ║
 ╠══════════════════════════════════════════════════════════════════════════════════╣
-║ Server aktif di   : http://${DISPLAY_HOST}:${PORT}/                                      ║
-║ Folder repositori : ${STORAGE_DIR}
-║ Format didukung   : ${allowed}                                       ║
-║ Runtime           : Bun ${Bun.version}                                                   ║
+║ Server aktif di   : http://${DISPLAY_HOST}:${PORT}/                                       ║
+║ Folder repositori : ${STORAGE_DIR}             ║
+║ Runtime           : Bun ${Bun.version}                                                    ║
 ║ Mode              : Real-Time Auto-Discovery                                     ║
 ╚══════════════════════════════════════════════════════════════════════════════════╝
 `);
